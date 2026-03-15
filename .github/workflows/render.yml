@@ -1,0 +1,105 @@
+name: Render Remotion Video
+
+on:
+  push:
+    branches: [main]
+    paths:
+      # Only trigger when these paths change – no point running on README edits etc.
+      - 'src/**'
+      - 'public/**'
+      - 'package.json'
+      - 'remotion.config.ts'
+      - 'tsconfig.json'
+      - '.github/workflows/render.yml'
+  workflow_dispatch: # allow manual trigger
+
+jobs:
+  render:
+    name: Render MetaIntelligence.mp4
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Compute source checksum ───────────────────────────────────────────
+      # Hash everything that affects the output: src/, public/, config files.
+      # If nothing changed the hash matches the cache and we skip the render.
+      - name: Compute render checksum
+        id: checksum
+        run: |
+          HASH=$(find src/ public/ package.json remotion.config.ts tsconfig.json \
+            -type f | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+          echo "hash=$HASH" >> $GITHUB_OUTPUT
+          echo "Render hash: $HASH"
+
+      # ── 3. Check cache ────────────────────────────────────────────────────────
+      - name: Restore render cache
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: out/
+          key: render-${{ steps.checksum.outputs.hash }}
+
+      # ── 4. Skip message (cache hit) ───────────────────────────────────────────
+      - name: Skip render (no changes)
+        if: steps.cache.outputs.cache-hit == 'true'
+        run: |
+          echo "✅ Source unchanged (hash: ${{ steps.checksum.outputs.hash }})"
+          echo "   Skipping render – using cached out/meta-intelligence.mp4"
+
+      # ── 5. Setup Node (only when render needed) ───────────────────────────────
+      - name: Setup Node.js
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      # ── 6. Install deps (only when render needed) ─────────────────────────────
+      - name: Install dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: npm ci
+
+      # ── 7. Install Chromium for Remotion (only when render needed) ────────────
+      - name: Install Remotion browser
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: npx remotion browser ensure
+
+      # ── 8. Render ─────────────────────────────────────────────────────────────
+      - name: Render video
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p out
+          npx remotion render MetaIntelligence out/meta-intelligence.mp4 \
+            --codec=h264 \
+            --jpeg-quality=80 \
+            --log=verbose
+        env:
+          # Remotion reads this for concurrency tuning
+          NODE_ENV: production
+
+      # ── 9. Upload artifact ────────────────────────────────────────────────────
+      - name: Upload render artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: meta-intelligence-${{ steps.checksum.outputs.hash }}
+          path: out/meta-intelligence.mp4
+          retention-days: 30
+
+      # ── 10. Tag + release (only on fresh renders) ─────────────────────────────
+      - name: Create GitHub Release
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: render-${{ steps.checksum.outputs.hash }}
+          name: "Render ${{ steps.checksum.outputs.hash }}"
+          body: |
+            Auto-rendered on push to `main`.
+            Source hash: `${{ steps.checksum.outputs.hash }}`
+            Commit: ${{ github.sha }}
+          files: out/meta-intelligence.mp4
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
